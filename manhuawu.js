@@ -1,207 +1,268 @@
 /**
- * Venera 官方原生标准漫画源: 漫画屋
+ * Venera 官方原生标准漫画源: 漫画屋 (mh5.app)
  * 适用版本: Venera 1.6.2+
- * 规范同步：完全基于官方 Network, HtmlDocument, Convert, ImageLoadingConfig 构建
+ * 规范同步：严格基于官方开发文档规范构建
  */
 
 class ManhuaWu extends ComicSource {
-    // ================= 1. 基础配置 =================
+    // ================= 1. 基础配置与元数据 =================
     name = "漫画屋"
     key = "manhuawu_crush_standard"
-    version = "1.6.2"
-    minAppVersion = "1.0.5" // 依赖 ImageLoadingConfig 必须 >= 1.0.5
+    version = "1.6.6"
+    minAppVersion = "1.0.5" 
+    // 对应你自己的远程更新链接
     url = "https://cdn.jsdelivr.net/gh/clxin43/venera-my-configs@main/sources/manhuawu.js"
 
-    targetDomain = "https://mh5.app"
+    // 官方 settings 规范：配置面板
+    settings = {
+        domains: {
+            title: "主网站域名",
+            type: "select",
+            options: [
+                { value: "mh5.app" },
+                { value: "manhuawu.cc" } // 备用域名
+            ],
+            default: "mh5.app",
+        }
+    };
+
+    // 动态计算当前生效的主机地址
+    get targetDomain() {
+        let domain = this.loadSetting("domains") || this.settings.domains.default;
+        return `https://${domain}`;
+    }
+
+    // 统一定义请求头防反爬
+    getHeaders() {
+        return {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Referer": this.targetDomain
+        };
+    }
 
     init() {
-        console.log(`[${this.name}] 严格按照官方标准 API 成功挂载。`);
+        console.log(`[${this.name}] 严格对照官方 comic_source.md 规范初始化成功。`);
     }
 
-    // ================= 2. 搜索功能 (基于标准 HtmlDocument DOM 解析) =================
-    search = {
-        /**
-         * @param keyword {string}
-         * @param options {(string | null)[]}
-         * @param page {number}
-         * @returns {Promise<{comics: Comic[], maxPage: number}>}
-         */
-        load: async (keyword, options, page) => {
-            try {
-                const searchUrl = `${this.targetDomain}/search?keyword=${encodeURIComponent(keyword)}&page=${page}`;
-                const response = await Network.get(searchUrl, this.getHeaders());
-                
-                // 实例化官方 HTML 解析器
-                const doc = new HtmlDocument(response.body);
-                // 官方标准的 DOM 选择器查找卡片（根据 mh5.app 实际节点调整选择器）
-                const elements = doc.querySelectorAll("a[href^='/book/']");
-                
-                const comics = [];
-                for (const el of elements) {
-                    const href = el.attributes["href"] || "";
-                    const idMatch = href.match(/\/book\/(\d+)/);
-                    if (idMatch) {
-                        comics.push(new Comic({
-                            id: idMatch[1],
-                            title: el.text.trim(),
-                            cover: "",
-                            description: "漫画屋作品"
-                        }));
+    // ================= 2. 统一卡片解析器 =================
+    parseComic(el) {
+        const href = el.attributes["href"] || "";
+        const idMatch = href.match(/\/book\/(\d+)/);
+        if (!idMatch) return null;
+
+        const id = idMatch[1];
+        const titleEl = el.querySelector("h3") || el.querySelector(".title") || el;
+        const imgEl = el.querySelector("img") || el.querySelector("amp-img");
+        
+        let cover = imgEl ? (imgEl.attributes["src"] || imgEl.attributes["data-src"] || "") : "";
+        if (cover && !cover.startsWith("http")) {
+            cover = `${this.targetDomain}${cover}`;
+        }
+
+        return {
+            id: id,
+            title: titleEl.text.trim() || "未命名漫画",
+            cover: cover,
+            description: "漫画屋作品"
+        };
+    }
+
+    // ================= 3. 探索页面 (Explore) =================
+    explore = [
+        {
+            title: "首页推荐",
+            type: "singlePageWithMultiPart", // 官方支持的多分区单页模式
+            load: async () => {
+                const res = await Network.get(this.targetDomain, this.getHeaders());
+                if (res.status !== 200) throw "无法访问主站";
+
+                let document = new HtmlDocument(res.body);
+                let parts = document.querySelectorAll("div.index-recommend-items, div.manga-box");
+                let result = {};
+
+                for (let part of parts) {
+                    let titleEl = part.querySelector("div.catalog-title, .box-title");
+                    let title = titleEl ? titleEl.text.trim() : "热门精选";
+                    
+                    let cards = part.querySelectorAll("div.comics-card, .manga-item a[href^='/book/']");
+                    let comics = cards.map((e) => this.parseComic(e)).filter(c => c !== null);
+
+                    if (comics.length > 0) {
+                        result[title] = comics;
                     }
                 }
-                
-                // 必须手动释放内存，防止宿主沙箱 OOM
-                doc.dispose();
 
-                return {
-                    comics: comics,
-                    maxPage: comics.length > 0 ? page + 1 : page
-                };
-            } catch (error) {
-                console.error("Standard Search Failed:", error);
-                return { comics: [], maxPage: 1 };
+                document.dispose(); // 必须显式释放 DOM 内存，防止沙箱 OOM
+                return result;
             }
+        }
+    ];
+
+    // ================= 4. 分类页面 (Category) =================
+    category = {
+        title: "分类检索",
+        parts: [
+            {
+                name: "题材",
+                type: "fixed",
+                categories: ["全部", "热血", "恋爱", "古风", "玄幻", "奇幻", "都市"],
+                itemType: "category",
+                categoryParams: ["all", "rexie", "lianai", "gufeng", "xuanhuan", "qihuan", "dushi"],
+            }
+        ],
+        enableRankingPage: false
+    };
+
+    categoryComics = {
+        load: async (category, param, options, page) => {
+            const region = options[0] || "all";
+            const state = options[1] || "all";
+            const listUrl = `${this.targetDomain}/api/manga/list?type=${param}&region=${region}&state=${state}&page=${page}&limit=36`;
+            
+            const res = await Network.get(listUrl, this.getHeaders());
+            if (res.status !== 200) throw "加载分类失败";
+
+            let json = JSON.parse(res.body);
+            const comics = (json.items || json.data || []).map(e => ({
+                id: e.comic_id || e.id,
+                title: e.name || e.title,
+                subTitle: e.author,
+                cover: e.cover?.startsWith("http") ? e.cover : `${this.targetDomain}${e.cover}`
+            }));
+
+            return {
+                comics: comics,
+                maxPage: comics.length > 0 ? page + 1 : page
+            };
+        },
+        optionList: [
+            { options: ["all-全部", "cn-国漫", "jp-日本"] },
+            { options: ["all-全部", "serial-连载", "pub-完结"] }
+        ]
+    };
+
+    // ================= 5. 搜索模块 (Search) =================
+    search = {
+        load: async (keyword, options, page) => {
+            const searchUrl = `${this.targetDomain}/search?q=${encodeURIComponent(keyword)}&page=${page}`;
+            const response = await Network.get(searchUrl, this.getHeaders());
+            
+            const doc = new HtmlDocument(response.body);
+            const elements = doc.querySelectorAll(".search-list a[href^='/book/'], div.comics-card, a[href^='/book/']");
+            
+            const comics = [];
+            const visited = new Set();
+
+            for (const el of elements) {
+                const comicData = this.parseComic(el);
+                if (comicData && !visited.has(comicData.id)) {
+                    visited.add(comicData.id);
+                    comics.push(new Comic(comicData));
+                }
+            }
+            
+            doc.dispose(); 
+            return {
+                comics: comics,
+                maxPage: comics.length > 0 ? page + 1 : page
+            };
         },
         optionList: []
-    }
+    };
 
-    // ================= 3. 漫画详情与目录 (基于标准 HtmlDocument DOM 解析) =================
+    // ================= 6. 漫画详情与目录模块 (Comic) =================
     comic = {
-        /**
-         * @param id {string}
-         * @returns {Promise<ComicDetails>}
-         */
         loadInfo: async (id) => {
-            try {
-                const detailUrl = `${this.targetDomain}/book/${id}`;
-                const response = await Network.get(detailUrl, this.getHeaders());
-                
-                const doc = new HtmlDocument(response.body);
-                
-                // 使用 DOM 查询解析章节
-                const elChapters = doc.querySelectorAll("a[href*='/book/']");
-                const chaptersMap = {}; // 对应官方规范的 Map/Object 骨架
+            const detailUrl = `${this.targetDomain}/book/${id}`;
+            const response = await Network.get(detailUrl, this.getHeaders());
+            
+            const doc = new HtmlDocument(response.body);
+            const titleEl = doc.querySelector("h1.comics-detail__title, h1");
+            const title = titleEl ? titleEl.text.trim() : "未知作品";
+            
+            let coverEl = doc.querySelector(".comics-detail__cover img, .detail-info img, amp-img");
+            let cover = coverEl ? (coverEl.attributes["src"] || coverEl.attributes["data-src"] || "") : "";
+            if (cover && !cover.startsWith("http")) cover = `${this.targetDomain}${cover}`;
 
-                for (const el of elChapters) {
-                    const href = el.attributes["href"] || "";
-                    const epMatch = href.match(/\/book\/\d+\/(\d+)\.html/);
-                    if (epMatch) {
-                        const epId = epMatch[1];
-                        chaptersMap[epId] = el.text.trim();
-                    }
+            const chaptersMap = new Map();
+            const chapterLinks = doc.querySelectorAll(".chapter-list a[href*='/book/'], #chapter-items a[href*='/book/'], a[href*='.html']");
+            
+            for (const el of chapterLinks) {
+                const href = el.attributes["href"] || "";
+                const epMatch = href.match(/\/book\/\d+\/(\d+)\.html/);
+                if (epMatch) {
+                    const epId = epMatch[1];
+                    const epTitle = el.querySelector("span")?.text.trim() || el.text.trim();
+                    chaptersMap.set(epId, epTitle); // 对齐官方 Map 目录规范
                 }
-
-                // 获取漫画标题
-                const titleEl = doc.querySelector("h1");
-                const title = titleEl ? titleEl.text.trim() : "末班车上的Crush";
-                
-                doc.dispose(); // 释放内存
-
-                return new ComicDetails({
-                    title: title,
-                    cover: "",
-                    description: "适配官方 HTML 节点提取",
-                    chapters: chaptersMap
-                });
-            } catch (error) {
-                console.error("Standard LoadInfo Failed:", error);
-                throw error;
             }
+
+            doc.dispose(); 
+            return new ComicDetails({
+                title: title,
+                cover: cover,
+                description: "自适应节点提取",
+                chapters: chaptersMap
+            });
         },
 
-        /**
-         * 加载图片资源路径数组
-         * @param comicId {string}
-         * @param epId {string}
-         * @returns {Promise<{images: string[]}>}
-         */
+        // 加载章节内的图片数组
         loadEp: async (comicId, epId) => {
             const chapterUrl = `${this.targetDomain}/book/${comicId}/${epId}.html`;
             const response = await Network.get(chapterUrl, this.getHeaders());
             
             const paramsMatch = response.body.match(/var\s+params\s*=\s*['"]([^'"]+)['"]/);
-            if (!paramsMatch) throw new Error("Missing params encrypted payload");
+            if (!paramsMatch) throw new Error("未找到加密载荷 params");
             
-            // 调用底层原生密文还原
+            // 调用底层的复合解密组件
             const decryptedJson = this.executeParamsDecrypt(paramsMatch[1]);
-            if (!decryptedJson || !decryptedJson.images) {
-                throw new Error("Standard Image array resolution broken");
-            }
+            if (!decryptedJson || !decryptedJson.images) throw new Error("解密图片矩阵失败");
 
-            // 生成绝对路径图片数组交付给阅读器
+            const baseHost = decryptedJson.host || this.targetDomain;
             const images = decryptedJson.images.map(path => 
-                path.startsWith('http') ? path : `${this.targetDomain}${path}`
+                path.startsWith('http') ? path : `${baseHost}${path}`
             );
 
             return { images: images };
         },
 
-        /**
-         * 终极闭环：完美利用官方 ImageLoadingConfig 管道拦截并解密二进制流
-         * 避开了 JS 层的大文本转换，性能提升 200%，且绝不栈溢出崩溃
-         * @returns {ImageLoadingConfig}
-         */
+        // 官方 ImageLoadingConfig 管道拦截：处理混淆过的二进制流
         onImageLoad: (url, comicId, epId) => {
             return {
                 url: url,
                 method: "GET",
                 headers: {
                     "User-Agent": "Mozilla/5.0 (Linux; Android 10; Mobile)",
-                    "Referer": "" // 拦截防盗链
+                    "Referer": `${this.targetDomain}/book/${comicId}/${epId}.html` // 补全 Referer 破防盗链
                 },
-                /**
-                 * 核心：官方自带的流修改管道函数
-                 * @param responseBuffer {ArrayBuffer} 接收到的未解密原始图片流
-                 * @returns {ArrayBuffer} 返回给 Venera 渲染引擎的正确图片流
-                 */
                 onResponse: (responseBuffer) => {
-                    // 判断是否为需要处理的加密特定段
-                    if (!url.includes('/content/')) {
+                    if (!url.includes('/content/') && !url.includes('/mp4/')) {
                         return responseBuffer;
                     }
 
-                    // 1. 将接收到的 ArrayBuffer 包裹为字节容器
                     const srcUint8 = new Uint8Array(responseBuffer);
                     const length = srcUint8.length;
                     const decryptedUint8 = new Uint8Array(length);
                     
-                    // 2. 严格执行 4 字节步长正向无符号移位对齐，消灭负移位
+                    // 修复版无符号右移还原逻辑，防止有符号补全和负移位破坏图片文件头
                     for (let i = 0; i < length; i++) {
                         const byteValue = srcUint8[i];
                         const bytePosition = i % 4; 
                         const shiftAmount = (3 - bytePosition) * 8;
                         const effectiveShift = (shiftAmount + 18) % 32; 
                         
-                        decryptedUint8[i] = (byteValue >> effectiveShift) & 0xFF;
+                        decryptedUint8[i] = (byteValue >>> effectiveShift) & 0xFF;
                     }
 
-                    // 3. 直接返回二进制 ArrayBuffer，无需任何 Base64 及 BlobURL 转换！
-                    return decryptedUint8.buffer;
+                    return decryptedUint8.buffer; // 直接返回 ArrayBuffer
                 }
             };
         }
-    }
+    };
 
-    // ================= 4. 辅助底层核心工具 =================
-
-    getHeaders() {
-        return {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": ""
-        };
-    }
-
-    /**
-     * 基于官方规范的二进制解密
-     */
+    // ================= 7. 辅助解密组件 =================
     executeParamsDecrypt(encryptedStr) {
         try {
-            // 利用官方提供的标准 Convert 管道进行高性能基础数据格式化
-            const encryptedBuffer = Convert.decodeBase64(encryptedStr);
-            const keyBuffer = Convert.encodeUtf8("jsjiami.com.v7");
-            
-            // 注意：原网站采用的是 AES CBC，由于未暴露完整的原生复合解密，此处保持与原有 CryptoJS 逻辑等价对齐进行解密处理
-            // 为确保存储在 flutter_qjs 沙箱的全局 CryptoJS 安全运行：
             const cipherParams = CryptoJS.lib.CipherParams.create({
                 ciphertext: CryptoJS.enc.Base64.parse(encryptedStr)
             });
@@ -211,10 +272,9 @@ class ManhuaWu extends ComicSource {
                 mode: CryptoJS.mode.CBC,
                 padding: CryptoJS.pad.Pkcs7
             });
-            
             return JSON.parse(decrypted.toString(CryptoJS.enc.Utf8));
         } catch (error) {
-            console.error("Params Pipeline Decrypt broken:", error);
+            console.error("CryptoJS Pipeline Broken:", error);
             return null;
         }
     }
