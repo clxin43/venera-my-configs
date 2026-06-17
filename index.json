@@ -1,7 +1,7 @@
 [
   {
     "name": "漫画屋",
-    "filename": "manhuawu.js",
+    "filename": "sources/manhuawu.js",
     "version": "1.6.2",
     "description": "严格适配 Venera 1.6.2 官方原生扩展规范"
   }
