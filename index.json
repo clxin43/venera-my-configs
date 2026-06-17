@@ -1,8 +1,8 @@
 [
   {
-    "name": "漫画屋 (末班车上的Crush)",
+    "name": "漫画屋",
     "filename": "sources/manhuawu.js",
-    "version": "1.0.0",
-    "description": "适配 mh5.app，支持流解密与防盗链图片加载"
+    "version": "1.6.2",
+    "description": "严格适配 Venera 1.6.2 官方原生扩展规范"
   }
 ]
